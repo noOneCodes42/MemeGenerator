@@ -1,132 +1,186 @@
-from peft import LoraConfig, get_peft_model
-from transformers import TrainingArguments, Trainer, BertTokenizer, BertModel
+# prompt: Make code that can be used to fine tune with this dataset emily49/hateful_memes_test and this model sd-legacy/stable-diffusion-v1-5, with the macs gpu.
+# The structure of the dataset is image: image, id:int64, img: string(Not a file path), text:String. 
+# With this make the training loop and everything
 
-from diffusers import UNet2DConditionModel, DDPMScheduler, StableDiffusionPipeline, DiffusionPipeline
+# Install necessary libraries
+
+
+# Import libraries
+# import torch
+# from diffusers import StableDiffusionPipeline
+# from datasets import load_dataset
+# from PIL import Image
+# import os
+# import torch.nn.functional as F
+# import numpy as np
+# from torch.utils.data import DataLoader
+
+
+# # Check for MPS availability and set device and dtype accordingly
+# if torch.backends.mps.is_available():
+#     device = "mps"
+#     torch_dtype = torch.float16  # Use float16 for MPS
+# else:
+#     device = "cpu"
+#     torch_dtype = torch.float32  # Use float32 for CPU
+# print(f"Using device: {device}")
+
+# # Load the dataset
+# dataset = load_dataset("emily49/hateful_memes_test", split="train")
+
+# # Load the pre-trained model
+# model_id = "sd-legacy/stable-diffusion-v1-5"
+# pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch_dtype).to(device)
+
+# # Remove safety checker (use with caution)
+# if "safety_checker" in pipe.components:
+#     del pipe.components["safety_checker"]
+
+# # Define hyperparameters (adjust as needed)
+# learning_rate = 5e-6   # Example learning rate
+# num_epochs = 3  # Example number of epochs
+# batch_size = 16  # Example batch size (adjust based on your GPU memory)
+# dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+
+# # Get all parameters of the pipeline's modules
+# params = []
+# for name, module in pipe.components.items():
+#     if hasattr(module, "parameters"):
+#         params.extend(list(module.parameters()))
+
+# # Create the optimizer using the collected parameters
+# optimizer = torch.optim.AdamW(params, lr=learning_rate)
+
+# # Training loop
+# for epoch in range(num_epochs):
+#     for i, example in enumerate(dataset):
+#         # Preprocess text prompt (replace with your actual preprocessing if needed)
+#         prompt = example['text']
+
+#         # Generate an image with the Stable Diffusion model
+#         image = pipe(prompt, num_inference_steps=50).images[0]
+
+#         # Convert PIL Image to NumPy array and then to PyTorch tensor
+#         generated_image_np = np.array(image)
+#         generated_image_tensor = torch.tensor(generated_image_np, dtype=torch_dtype, device=device, requires_grad=True) / 255.0 # requires_grad=True added here
+
+#         # Convert target image (PngImageFile) to NumPy array and then to tensor
+#         target_image_np = np.array(example['image'])
+
+#         # Ensure target image has 3 channels (RGB)
+#         if target_image_np.ndim == 2:  # If grayscale, convert to RGB
+#             target_image_np = np.stack([target_image_np] * 3, axis=-1)
+#         elif target_image_np.shape[2] != 3:  # If not RGB, convert to RGB
+#             target_image_np = target_image_np[:, :, :3]  # Take only the first 3 channels
+
+#         target_image_tensor = torch.tensor(target_image_np, dtype=torch_dtype, device=device) / 255.0
+
+#         # Reshape to (C, H, W) before resizing
+#         target_image_tensor = target_image_tensor.permute(2, 0, 1).unsqueeze(0).float()
+
+#         # Resize target image to match generated image dimensions
+#         target_image_tensor = F.interpolate(target_image_tensor,
+#                                            size=(generated_image_tensor.shape[0], generated_image_tensor.shape[1]),
+#                                            mode='bilinear', align_corners=False).squeeze(0)
+        
+#         # Permute back to (H, W, C) for loss calculation
+#         target_image_tensor = target_image_tensor.permute(1, 2, 0)
+
+#         # Calculate the loss (e.g., mean squared error)
+#         loss = F.mse_loss(generated_image_tensor.float(), target_image_tensor.float())
+
+#         # Backpropagation
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.zero_grad()
+
+#         if (i + 1) % 10 == 0:
+#             print(f"Epoch: {epoch + 1}, Batch: {i + 1}, Loss: {loss.item()}")
+
+# # Save the fine-tuned model (replace with your desired saving location)
+# pipe.save_pretrained("fine_tuned_sd_model")
+
+# # Example inference after fine-tuning
+# image = pipe(	
+# "to see better, asians sometime switch to fullscreen veiw", num_inference_steps=100).images[0]
+
+# # Save or display the generated image
+# image.save("generated_image1.png")
+
+# print("Finished")
+# Optimized With Batch and Memory side by side
+from torch.utils.data import DataLoader
+import torchvision.transforms as T
 from datasets import load_dataset
 import torch
-from torch.utils.data import DataLoader
-from torchvision import transforms
+from diffusers import StableDiffusionPipeline
+import torch.nn.functional as F
+import numpy as np
 from PIL import Image
-import sys
+from math import ceil
 
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-text_model = BertModel.from_pretrained("bert-base-uncased")
+# Load dataset
+dataset = load_dataset("emily49/hateful_memes_test", split="train")
 
+# Define transformation
+transform = T.Compose([T.ToTensor(), T.Resize((512, 512))])
 
+# Dataset wrapper for DataLoader
+class MemeDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
 
-def preprocess(example):
-    """
-    Preprocess dataset: Resize and normalize images, tokenize captions
-    """
-    image = example["image"]
-    if not isinstance(image, Image.Image):
-        image = Image.open(image)
+    def __len__(self):
+        return len(self.dataset)
 
-    
-    image = image.convert("RGBA")
-    
-    transform = transforms.Compose([
-        transforms.Resize((512,512)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5])
-    ])
-    example["pixel_values"] = transform(image).unsqueeze(0)
+    def __getitem__(self, idx):
+        example = self.dataset[idx]
+        prompt = example['text']
+        target_image = Image.fromarray(np.array(example['image'])).convert('RGB')
+        if self.transform:
+            target_image = self.transform(target_image)
+        return prompt, target_image
 
+# DataLoader with batching
+num_epochs = 1
+batch_size = 8  # Adjust based on GPU memory
+dataloader = DataLoader(MemeDataset(dataset, transform), batch_size=batch_size, shuffle=True)
 
-     # Tokenize text (captions)
-    text = example["text"]  # Assuming you have a "text" field in the dataset
-    tokenized_text = tokenizer(text, padding=True, truncation=True, return_tensors="pt")
+device = "mps"
+torch_dtype = torch.float32
 
+pipe = StableDiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch_dtype).to(device)
+optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=5e-6)  # Optimize only U-Net weights
 
-    # Get encoder hidden states (embeddings) from the text model
-    encoder_hidden_states = text_model(**tokenized_text).last_hidden_state.squeeze(0)
-    example["encoder_hidden_states"] = encoder_hidden_states  # Store the embeddings
-
-    return example
-
-
-
-def main():
-    # Load the dataset and preproccess it
-    print("Load dataset")
-    dataset = load_dataset("emily49/hateful_memes_test")
-    print("Dataset loaded")
-    dataset = dataset.map(preprocess, remove_columns=["image"])
-
-
-    # Load a model, define lora_config, apply lora_config to the model
-    # Def training args, and train the model
-    print("Dataset mapped, loading model")
-    model_id = "sd-legacy/stable-diffusion-v1-5"
-    #model_id = "runwayml/stable-diffusion-v1-5"
-    #model_id = "CompVis/stable-diffusion-v1-4"
-    #model_id = "stabilityai/stable-diffusion-2"
-    model = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet")
-    print("Model Loaded")
-    lora_config = LoraConfig(
-        r=8, lora_alpha=32, target_modules = ["to_q", "to_k", "to_v", "to_out.0"], lora_dropout=0.1
-    )
-    print("LORA config defined")
-    model = get_peft_model(model, lora_config)
-    print("Model loaded with LORA config")
-
-    traing_args = TrainingArguments(
-        output_dir="./lora_model",
-        per_device_train_batch_size=1,
-        learning_rate=5e-6,
-        num_train_epochs=5,
-        save_strategy="epoch",
-        logging_dir="./logs"
-    )
-    print("Training args created, lets load the training set")
-
-    # Create DataLoader
-    train_dataloader = DataLoader(dataset["train"], batch_size=1, shuffle=True, collate_fn=lambda x: x[0])
-    print("Training dataset loaded")
-    # Move model to Apple Metal GPU
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"The device is: {device}")
-    model.to(device)
-
-    # Training loop
-    print("Defining optimizer")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=traing_args.learning_rate)
-    model.train()
-    print("Starting epochs")
-    # Define total number of diffusion steps
-    total_steps = 1000
-    for epoch in range(traing_args.num_train_epochs):
-        for step, batch in enumerate(train_dataloader):
-            # Convert list to tensor, cast to float32, and move to device
-            pixel_values = torch.tensor(batch["pixel_values"]).float().to(device)
-            optimizer.zero_grad()
-
-            current_timestep = total_steps - step  # Example: start from `total_steps` and go down to 0
-            
-            #timestep = torch.tensor([current_timestep], device=device)  # Adjust according to your logic
-            #timesteps = torch.tensor([current_timestep] * pixel_values.shape[0], device=device)
-            timestep = torch.tensor([current_timestep] * pixel_values.shape[0], device=device)
-
+# Training loop with batching
+for epoch in range(num_epochs):
+    for i, (prompts, target_images) in enumerate(dataloader):
+        optimizer.zero_grad()
+        with torch.no_grad():
+            images = []
+            for prompt in prompts:  # Generate one by one
+                image = pipe(prompt, num_inference_steps=50).images[0]
+                image = transform(image).to(device, dtype=torch_dtype)
+                images.append(image)
         
-            # Prepare encoder_hidden_states (e.g., from text encoder, assuming batch has this)
-            
-            encoder_hidden_states = torch.tensor(batch["encoder_hidden_states"]).float().to(device)
-             # Forward pass with the required arguments
-            outputs = model(pixel_values, timestep=timestep, encoder_hidden_states=encoder_hidden_states)
-        
-            #outputs = model(pixel_values)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
+        generated_images_tensor = torch.stack(images).requires_grad_()
+        target_images = target_images.to(device, dtype=torch_dtype)
 
-            if step % 10 == 0:
-                print(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}")
+        loss = F.mse_loss(generated_images_tensor, target_images)
+        loss.backward()
+        optimizer.step()
 
-    # Save the fine tuned model
-    print("Save the model")
-    model.save_pretrained(traing_args.output_dir)
-    print("Fine tuning completed!")
+        print(f"Epoch: {epoch + 1}, Batch: {i + 1}, Loss: {loss.item()}")
 
-if __name__ == '__main__':
-    main()
-    print("Hello World!")
+pipe.save_pretrained("fine_tuned_sd_model")
+
+# Example inference after fine-tuning
+image = pipe(   
+"to see better, asians sometime switch to fullscreen veiw", num_inference_steps=100).images[0]
+
+# Save or display the generated image
+image.save("generated_image1.png")
+
+print("Finished")
